@@ -92,7 +92,7 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "attempt") -> bytes:
 # UI
 # -----------------------------
 st.set_page_config(page_title="數學考卷分析 MVP", layout="wide")
-st.title("數學考卷分析 MVP（可選字 PDF）")
+st.title("數學考卷分析 MVP（可選字 PDF）【測試重部署】")
 
 # 初始化 session_state
 if "pdf_bytes" not in st.session_state:
