@@ -204,14 +204,14 @@ def run_analysis():
 # -----------------------------
 # UI
 # -----------------------------
-st.set_page_config(page_title="數學考卷分析 MVP", layout="wide")
+st.set_page_config(page_title="考卷分析 MVP", layout="wide")
 init_state()
 
-st.title("數學考卷分析 MVP（可選字 PDF）")
+st.title("考卷分析 MVP（可選字 PDF）")
 st.caption("上傳 PDF → 解析一次 → 左側輸入作答字串按『分析作答』→ 主畫面顯示結果")
 
 # Sidebar controls (ALWAYS visible)
-st.sidebar.header("作答分析（永遠顯示）")
+st.sidebar.header("作答情形輸入")
 st.session_state["ans_str"] = st.sidebar.text_input(
     "作答字串（- 對 / X 錯）",
     value=st.session_state.get("ans_str", ""),
