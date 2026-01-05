@@ -66,83 +66,39 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
 
 
 def guess_exam_items(full_text: str) -> List[ExamItem]:
-    lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
-    anchors = []  # (line_index, label)
-
-    patterns = [
-        (r"^(?P<q>\d{1,3})\s*[\.、\)\]:：]\s*(?P<rest>.*)$", "main"),
-        (r"^第\s*(?P<q>\d{1,3})\s*題\s*(?P<rest>.*)$", "main")
-    ]
-
-    current_main = None
+    """
+    MVP heuristic: detect question anchors by lines starting with "1 ", "1.", "1、" ...
+    """
+    lines = [ln.strip() for ln in full_text.splitlines()]
+    anchors = []
 
     for i, ln in enumerate(lines):
-        hit = None
-        for pat, kind in patterns:
-            m = re.match(pat, ln)
-            if m:
-                hit = (kind, m.groupdict())
-                break
-        if not hit:
-            continue
+        m = re.match(r"^(\d{1,3})\s*[\.、]?\s+", ln)
+        if m:
+            anchors.append((i, m.group(1)))
 
-        kind, gd = hit
-        label = None
-
-        if kind == "main":
-            q = gd.get("q")
-            current_main = q
-            label = q
-
-        elif kind == "compound":
-            q = gd.get("q")
-            s = gd.get("s")
-            current_main = q
-            label = f"{q}({s})"
-
-        elif kind == "sub":
-            s = gd.get("s")
-            if current_main is not None:
-                label = f"{current_main}({s})"
-            else:
-                # 沒有主題上下文，先不要當作作答點（可調整）
-                continue
-
-        elif kind == "circled":
-            c = gd.get("c")
-            # 若你要圈號也當作小題，可把它接到 current_main
-            if current_main is not None:
-                label = f"{current_main}{c}"
-            else:
-                label = c
-
-        if label is not None:
-            anchors.append((i, label))
-
-    # 去掉連續重複
+    # De-duplicate consecutive same question number
     filtered = []
-    last_label = None
-    for idx, label in anchors:
-        if label != last_label:
-            filtered.append((idx, label))
-            last_label = label
+    last_qn = None
+    for idx, qn in anchors:
+        if qn != last_qn:
+            filtered.append((idx, qn))
+            last_qn = qn
 
-    # 依 anchor 到下一個 anchor 切 block
     items: List[ExamItem] = []
-    for k, (start_i, label) in enumerate(filtered):
+    for k, (start_i, qn) in enumerate(filtered):
         end_i = filtered[k + 1][0] if k + 1 < len(filtered) else len(lines)
-        block = " ".join(lines[start_i:end_i])
+        block = " ".join([x for x in lines[start_i:end_i] if x])
         preview = block[:80] + ("…" if len(block) > 80 else "")
         items.append(
             ExamItem(
                 order_index=k + 1,
-                label=label,
+                label=str(qn),
                 section="未知",
                 score=None,
                 stem_preview=preview,
             )
         )
-
     return items
 
 
