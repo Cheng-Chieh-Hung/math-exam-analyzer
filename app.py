@@ -134,22 +134,25 @@ def reset_all():
 
 def run_analysis():
     """按下『分析作答』時執行：一定會寫入 last_message / last_result_df。"""
-    if not st.session_state.items:
-        st.session_state.last_message = "❌ 尚未解析到作答點：請先上傳 PDF 並完成解析。"
+    items = st.session_state.get("items", None)
+
+    # 保底：items 不是 list 或是 None，都當作沒解析到
+    if not isinstance(items, list) or len(items) == 0:
+        st.session_state.last_message = "❌ 尚未解析到作答點：請先上傳 PDF 並完成解析（或按一次手動解析）。"
         st.session_state.last_result_df = None
         return
 
-    correctness = parse_answer_string(st.session_state.ans_str)
+    correctness = parse_answer_string(st.session_state.get("ans_str", ""))
     if len(correctness) == 0:
         st.session_state.last_message = "❌ 作答字串沒有讀到 '-' 或 'X'，請確認輸入格式（只接受 - 或 X）。"
         st.session_state.last_result_df = None
         return
 
     msg = "✅ 已完成作答分析。"
-    if len(correctness) != len(st.session_state.items):
-        msg += f"（提醒：作答長度 {len(correctness)} ≠ 作答點 {len(st.session_state.items)}，目前只分析前 {min(len(correctness), len(st.session_state.items))} 題）"
+    if len(correctness) != len(items):
+        msg += f"（提醒：作答長度 {len(correctness)} ≠ 作答點 {len(items)}，目前只分析前 {min(len(correctness), len(items))} 題）"
 
-    df = build_results_df(st.session_state.items, correctness)
+    df = build_results_df(items, correctness)
     st.session_state.last_result_df = df
     st.session_state.last_message = msg
 
@@ -210,6 +213,8 @@ if should_parse:
         full_text, _ = extract_text_from_pdf(st.session_state.pdf_bytes)
         st.session_state.full_text = full_text
         st.session_state.items = guess_exam_items(full_text)
+        if st.session_state.items is None:
+            st.session_state.items = []
         st.session_state.parsed_sig = st.session_state.uploaded_sig
     st.success("解析完成！請到左側輸入作答字串並按『分析作答』。")
 
