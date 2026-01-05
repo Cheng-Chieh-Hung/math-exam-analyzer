@@ -15,7 +15,7 @@ import streamlit as st
 class ExamItem:
     order_index: int
     label: str
-    section: str  # 單選 / 填充 / 非選 / 未知
+    section: str
     score: Optional[float]
     stem_preview: str
 
@@ -24,7 +24,6 @@ class ExamItem:
 # Core functions
 # -----------------------------
 def extract_text_from_pdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
-    """Extract selectable text from PDF and return full_text + per_page_text."""
     per_page = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
@@ -38,20 +37,14 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
 
 
 def guess_exam_items(full_text: str) -> List[ExamItem]:
-    """
-    MVP heuristic: detect question anchors by lines starting with "1 ", "1.", "1、" ...
-    Note: This is a coarse estimate. We'll improve later for 6(1), 三-2(2), etc.
-    """
     lines = [ln.strip() for ln in full_text.splitlines()]
     anchors = []
-
     for i, ln in enumerate(lines):
-        # Match: "1 " or "1." or "1、"
         m = re.match(r"^(\d{1,3})\s*[\.、]?\s+", ln)
         if m:
             anchors.append((i, m.group(1)))
 
-    # De-duplicate consecutive same question number
+    # 去掉連續重複題號
     filtered = []
     last_qn = None
     for idx, qn in anchors:
@@ -77,7 +70,6 @@ def guess_exam_items(full_text: str) -> List[ExamItem]:
 
 
 def parse_answer_string(ans: str) -> List[bool]:
-    """'-' => correct(True), 'X'/'x' => wrong(False). Ignore other chars."""
     cleaned = [c for c in ans.strip() if c in ["-", "X", "x"]]
     return [c == "-" for c in cleaned]
 
@@ -106,69 +98,64 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "attempt") -> bytes:
 
 
 def file_signature(uploaded_file) -> str:
-    """
-    Fast signature to detect if the uploaded file changed.
-    For MVP: name + size is enough.
-    """
     return f"{uploaded_file.name}:{uploaded_file.size}"
 
 
 # -----------------------------
-# Streamlit UI
+# UI
 # -----------------------------
 st.set_page_config(page_title="數學考卷分析 MVP", layout="wide")
 st.title("數學考卷分析 MVP（可選字 PDF）")
 
-st.markdown(
-    """
-此 MVP 目前提供：
-- 上傳 **可選字 PDF** → 抽取文字（只在換檔時解析一次，避免卡住）
-- 粗略偵測作答點（題號 anchor）
-- 貼上作答字串（`-` 對、`X` 錯）→ 產生結果與 Excel 下載
-
-下一階段可加：精準切題（含 6(1)、三-2(2)）、全班 CSV 匯入、學習表現/難易度分析與報表。
-"""
-)
-
 # ---- session state init ----
 if "pdf_bytes" not in st.session_state:
     st.session_state.pdf_bytes = None
-
 if "uploaded_sig" not in st.session_state:
     st.session_state.uploaded_sig = None
-
 if "parsed_sig" not in st.session_state:
     st.session_state.parsed_sig = None
-
 if "full_text" not in st.session_state:
     st.session_state.full_text = ""
-
 if "items" not in st.session_state:
     st.session_state.items = []
-
+if "ans_str" not in st.session_state:
+    st.session_state.ans_str = ""
 if "last_result_df" not in st.session_state:
     st.session_state.last_result_df = None
-
 if "last_message" not in st.session_state:
     st.session_state.last_message = ""
 
 
 # -----------------------------
-# Section 1: Upload & Parse
+# Sidebar: Answer analysis input (ALWAYS visible)
+# -----------------------------
+st.sidebar.header("作答分析（永遠顯示）")
+st.sidebar.caption("先上傳並解析考卷，再貼作答字串（- 對 / X 錯）")
+
+st.session_state.ans_str = st.sidebar.text_input(
+    "作答字串",
+    value=st.session_state.ans_str,
+    placeholder="例：-------X-X-----XX-XXX--X",
+)
+
+analyze_click = st.sidebar.button("分析作答", type="primary")
+st.sidebar.divider()
+st.sidebar.caption("小提醒：上傳/解析會讓頁面回到頂端，但 Sidebar 不會消失。")
+
+
+# -----------------------------
+# Main: Upload & Parse
 # -----------------------------
 st.subheader("1) 上傳考卷 PDF")
 pdf_file = st.file_uploader("請上傳可選字 PDF", type=["pdf"], key="pdf_uploader")
 
 col1, col2, col3 = st.columns([1, 1, 1])
-
 with col1:
-    auto_parse = st.checkbox("上傳後自動解析（推薦）", value=True)
-
+    auto_parse = st.checkbox("上傳後自動解析一次", value=True)
 with col2:
-    parse_btn = st.button("開始解析（抽取文字）", type="primary", disabled=(pdf_file is None and st.session_state.pdf_bytes is None))
-
+    parse_btn = st.button("手動解析", type="primary", disabled=(pdf_file is None and st.session_state.pdf_bytes is None))
 with col3:
-    reset_btn = st.button("清空本次資料（Reset）")
+    reset_btn = st.button("Reset（清空）")
 
 if reset_btn:
     st.session_state.pdf_bytes = None
@@ -178,9 +165,10 @@ if reset_btn:
     st.session_state.items = []
     st.session_state.last_result_df = None
     st.session_state.last_message = ""
-    st.success("已清空本次資料。請重新上傳 PDF。")
+    st.session_state.ans_str = ""
+    st.success("已清空，請重新上傳 PDF。")
 
-# Detect new upload and store bytes ONCE (only when file changes)
+# Detect new upload: store bytes ONCE, clear previous parse
 if pdf_file is not None:
     sig = file_signature(pdf_file)
     if st.session_state.uploaded_sig != sig:
@@ -193,13 +181,11 @@ if pdf_file is not None:
         st.session_state.pdf_bytes = pdf_file.getvalue()
         st.success("已上傳新檔案。")
 
-# Decide whether to parse
+# Parse only once per file (or manual)
 should_parse = False
 if st.session_state.pdf_bytes is not None:
-    # auto-parse only once per file
     if auto_parse and st.session_state.parsed_sig != st.session_state.uploaded_sig:
         should_parse = True
-    # or user clicks parse
     if parse_btn:
         should_parse = True
 
@@ -209,41 +195,38 @@ if should_parse:
         st.session_state.full_text = full_text
         st.session_state.items = guess_exam_items(full_text)
         st.session_state.parsed_sig = st.session_state.uploaded_sig
-    st.success("解析完成！")
+    st.success("解析完成！現在可在左側 Sidebar 輸入作答字串並分析。")
 
-# Show parse preview (optional)
+# Preview
 if st.session_state.full_text:
-    st.divider()
-    st.subheader("解析預覽")
+    st.subheader("2) 解析預覽")
+    st.write(f"偵測到作答點數量（粗估）：**{len(st.session_state.items)}**")
+
     with st.expander("文字預覽（前 1200 字）", expanded=False):
         preview_text = st.session_state.full_text[:1200]
         st.text(preview_text + ("…" if len(st.session_state.full_text) > 1200 else ""))
 
-    st.write(f"偵測到作答點數量（粗估）：**{len(st.session_state.items)}**")
     if st.session_state.items:
         df_items = pd.DataFrame([x.__dict__ for x in st.session_state.items])
         st.dataframe(df_items[["order_index", "label", "stem_preview"]], use_container_width=True, height=260)
 else:
-    st.info("尚未解析文字：請上傳 PDF，並等待自動解析或按「開始解析」。")
+    st.info("尚未解析：請先上傳 PDF（可選字）並等待自動解析或按「手動解析」。")
+
 
 # -----------------------------
-# Section 2: Answer analysis (ALWAYS visible)
+# Main: Analyze result display
 # -----------------------------
 st.divider()
-st.subheader("2) 作答分析（輸入框永遠顯示）")
+st.subheader("3) 作答分析結果")
 
-with st.form("analyze_form", clear_on_submit=False):
-    ans_str = st.text_input("貼上作答字串（例：-------X-X-----XX-XXX--X）", value="")
-    submitted = st.form_submit_button("分析作答")
-
-if submitted:
+if analyze_click:
     if not st.session_state.items:
         st.session_state.last_message = "❌ 尚未解析到作答點：請先上傳 PDF 並完成解析。"
         st.session_state.last_result_df = None
     else:
-        correctness = parse_answer_string(ans_str)
+        correctness = parse_answer_string(st.session_state.ans_str)
         if len(correctness) == 0:
-            st.session_state.last_message = "❌ 作答字串沒有讀到 '-' 或 'X'，請確認輸入格式（只接受 - 或 X）。"
+            st.session_state.last_message = "❌ 作答字串沒有讀到 '-' 或 'X'，請確認輸入格式。"
             st.session_state.last_result_df = None
         else:
             msg = "✅ 已完成作答分析。"
@@ -253,7 +236,7 @@ if submitted:
             st.session_state.last_result_df = df
             st.session_state.last_message = msg
 
-# Results area (always shows message if exists)
+# Show message + result
 if st.session_state.last_message:
     if st.session_state.last_result_df is None:
         st.error(st.session_state.last_message)
