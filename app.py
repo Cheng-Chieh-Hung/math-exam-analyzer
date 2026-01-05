@@ -71,10 +71,7 @@ def guess_exam_items(full_text: str) -> List[ExamItem]:
 
     patterns = [
         (r"^(?P<q>\d{1,3})\s*[\.、\)\]:：]\s*(?P<rest>.*)$", "main"),
-        (r"^第\s*(?P<q>\d{1,3})\s*題\s*(?P<rest>.*)$", "main"),
-        (r"^(?P<q>\d{1,3})\s*[\(（]\s*(?P<s>\d{1,2})\s*[\)）]\s*(?P<rest>.*)$", "compound"),
-        (r"^[\(（]\s*(?P<s>\d{1,2})\s*[\)）]\s*(?P<rest>.*)$", "sub"),
-        (r"^(?P<c>[①②③④⑤⑥⑦⑧⑨⑩])\s*(?P<rest>.*)$", "circled"),
+        (r"^第\s*(?P<q>\d{1,3})\s*題\s*(?P<rest>.*)$", "main")
     ]
 
     current_main = None
