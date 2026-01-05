@@ -67,38 +67,53 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
 
 def guess_exam_items(full_text: str) -> List[ExamItem]:
     """
-    MVP heuristic: detect question anchors by lines starting with "1 ", "1.", "1、" ...
+    只判斷兩種題號格式作為作答點：
+      - 1. 2. 3. ...
+      - 1、2、3、...
+    題號必須出現在「行首」。
     """
-    lines = [ln.strip() for ln in full_text.splitlines()]
-    anchors = []
+    lines = [ln.rstrip() for ln in full_text.splitlines()]
+    anchors = []  # (line_index, label)
 
-    for i, ln in enumerate(lines):
-        m = re.match(r"^(\d{1,3})\s*[\.、]?\s+", ln)
-        if m:
-            anchors.append((i, m.group(1)))
+    # 僅允許：行首 + 數字 + ('.'或'、') + 後面至少有一個非空白字元
+    # 例如： "1. 下列…" / "2、請計算…"
+    pattern = re.compile(r"^(?P<q>\d{1,3})(?P<sep>[\.、])\s*(?P<rest>\S.*)$")
 
-    # De-duplicate consecutive same question number
+    for i, raw in enumerate(lines):
+        ln = raw.strip()
+        m = pattern.match(ln)
+        if not m:
+            continue
+
+        q = m.group("q")
+        anchors.append((i, q))
+
+    # 去掉連續重複題號（避免換行/重排造成同題被抓兩次）
     filtered = []
-    last_qn = None
-    for idx, qn in anchors:
-        if qn != last_qn:
-            filtered.append((idx, qn))
-            last_qn = qn
+    last_q = None
+    for idx, q in anchors:
+        if q != last_q:
+            filtered.append((idx, q))
+            last_q = q
 
+    # 依 anchor 到下一個 anchor 切出題目區塊
     items: List[ExamItem] = []
-    for k, (start_i, qn) in enumerate(filtered):
+    for k, (start_i, q) in enumerate(filtered):
         end_i = filtered[k + 1][0] if k + 1 < len(filtered) else len(lines)
-        block = " ".join([x for x in lines[start_i:end_i] if x])
+        block_lines = [x.strip() for x in lines[start_i:end_i] if x.strip()]
+        block = " ".join(block_lines)
         preview = block[:80] + ("…" if len(block) > 80 else "")
+
         items.append(
             ExamItem(
                 order_index=k + 1,
-                label=str(qn),
+                label=q,
                 section="未知",
                 score=None,
                 stem_preview=preview,
             )
         )
+
     return items
 
 
