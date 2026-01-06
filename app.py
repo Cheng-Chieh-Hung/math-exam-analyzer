@@ -1,5 +1,6 @@
 import io
 import re
+import math
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any, Dict
 
@@ -127,6 +128,8 @@ def teacher_df_to_q_df_en(df_any: pd.DataFrame) -> pd.DataFrame:
     df = df[TEACHER_COLS_EN].copy()
     df["order_index"] = pd.to_numeric(df["order_index"], errors="coerce")
     df["label"] = df["label"].astype(str).str.strip()
+    # 配分轉 numeric（空白→NaN）
+    df["score"] = pd.to_numeric(df["score"], errors="coerce")
     return df
 
 
@@ -297,7 +300,17 @@ def answer_str_to_correctness(ans_str: str) -> List[bool]:
 
 
 def build_class_matrix_and_summary(q_df_en: pd.DataFrame, class_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    回傳：
+    - matrix_df（逐題矩陣，欄位順序依你指定）
+    - summary_df（學生總表：含 成績、排名）
+    """
     dfq = q_df_en.copy().sort_values("order_index").reset_index(drop=True)
+    dfq = teacher_df_to_q_df_en(dfq)  # 確保 score 是 numeric
+
+    # 配分：空白視為 0
+    score_list = dfq["score"].fillna(0.0).astype(float).tolist()
+    total_score = float(sum(score_list))
 
     # 逐題矩陣 base（欄位順序依你指定）
     matrix = pd.DataFrame({
@@ -311,8 +324,15 @@ def build_class_matrix_and_summary(q_df_en: pd.DataFrame, class_df: pd.DataFrame
 
     # 學生欄（依匯入順序）
     student_cols = []
+    per_student_scores = []  # 計算排名用
+    diff_series = dfq["difficulty"].fillna("").astype(str).tolist()
+
+    summary_rows = []
+
     for _, row in class_df.iterrows():
         seat = str(row[ATT_COL_SEAT]).strip()
+        name = str(row.get(ATT_COL_NAME, "")).strip()
+
         base_col = f"{seat}號學生對錯"
         col_name = base_col
         k = 2
@@ -322,22 +342,24 @@ def build_class_matrix_and_summary(q_df_en: pd.DataFrame, class_df: pd.DataFrame
         student_cols.append(col_name)
 
         correctness = answer_str_to_correctness(row[ATT_COL_ANS])
+
+        # matrix（對/錯）
         matrix[col_name] = ["對" if ok else "錯" for ok in correctness]
 
-    # 學生總表
-    summary_rows = []
-    diff_series = dfq["difficulty"].fillna("").astype(str).tolist()
+        # 成績（依配分加總）
+        student_score = 0.0
+        for ok, sc in zip(correctness, score_list):
+            if ok:
+                student_score += float(sc)
+        per_student_scores.append(student_score)
 
-    for _, row in class_df.iterrows():
-        seat = str(row[ATT_COL_SEAT]).strip()
-        name = str(row.get(ATT_COL_NAME, "")).strip()
-        correctness = answer_str_to_correctness(row[ATT_COL_ANS])
-
+        # 基本統計
         total = len(dfq)
         correct_n = sum(1 for x in correctness if x)
         wrong_n = total - correct_n
         acc = correct_n / total if total > 0 else 0.0
 
+        # 易/中/難錯題數（依題目表欄位）
         diff_wrong = {"易": 0, "中": 0, "難": 0}
         for d, ok in zip(diff_series, correctness):
             if not ok and d in diff_wrong:
@@ -347,6 +369,8 @@ def build_class_matrix_and_summary(q_df_en: pd.DataFrame, class_df: pd.DataFrame
             "座號": seat,
             "姓名": name,
             "題目數": total,
+            "總分": total_score,
+            "成績": student_score,
             "答對題數": correct_n,
             "答錯題數": wrong_n,
             "正確率": acc,
@@ -356,15 +380,144 @@ def build_class_matrix_and_summary(q_df_en: pd.DataFrame, class_df: pd.DataFrame
         })
 
     summary_df = pd.DataFrame(summary_rows)
+
+    # 排名（同分同名次：1,2,2,4）
+    if not summary_df.empty:
+        summary_df["排名"] = summary_df["成績"].rank(method="min", ascending=False).astype(int)
+        # 排序：排名、座號
+        summary_df = summary_df.sort_values(["排名", "座號"]).reset_index(drop=True)
+
     return matrix, summary_df
 
 
-def build_class_import_template(n_rows: int = 40) -> pd.DataFrame:
+def build_class_import_template() -> pd.DataFrame:
+    """
+    不提供「列數設定」，固定給一份可複製的範本（40列空白）。
+    """
+    n_rows = 40
     return pd.DataFrame({
         ATT_COL_SEAT: ["" for _ in range(n_rows)],
         ATT_COL_NAME: ["" for _ in range(n_rows)],
         ATT_COL_ANS:  ["" for _ in range(n_rows)],
     })
+
+
+# -----------------------------
+# 班級總體分析 sheet
+# -----------------------------
+def build_score_distribution(scores: pd.Series, total_score: float) -> pd.DataFrame:
+    """
+    10分一組組距。上限用 max(總分, 班級最高分) 往上取整到10的倍數。
+    """
+    scores = scores.fillna(0.0).astype(float)
+    max_score = float(scores.max()) if len(scores) else 0.0
+    upper = max(total_score, max_score)
+    upper = math.ceil(upper / 10.0) * 10.0
+
+    # 0,10,20,...,upper
+    edges = [x for x in range(0, int(upper) + 10, 10)]
+    if len(edges) < 2:
+        edges = [0, 10]
+
+    # [0,10),[10,20)...
+    cats = pd.cut(scores, bins=edges, right=False, include_lowest=True)
+    dist = cats.value_counts().sort_index()
+
+    rows = []
+    for interval, cnt in dist.items():
+        # interval like [0, 10)
+        left = int(interval.left)
+        right = int(interval.right) - 1
+        label = f"{left}-{right}"
+        rows.append({"成績組距(10分)": label, "人數": int(cnt)})
+    return pd.DataFrame(rows)
+
+
+def build_five_standards(scores: pd.Series) -> pd.DataFrame:
+    """
+    五標：頂/前/均/後/底，採常用百分位：
+    頂標=88%、前標=75%、均標=50%、後標=25%、底標=12%
+    """
+    s = scores.fillna(0.0).astype(float)
+    if len(s) == 0:
+        return pd.DataFrame([{"項目": x, "分數": 0.0} for x in ["頂標(88%)", "前標(75%)", "均標(50%)", "後標(25%)", "底標(12%)"]])
+
+    q88 = float(s.quantile(0.88))
+    q75 = float(s.quantile(0.75))
+    q50 = float(s.quantile(0.50))
+    q25 = float(s.quantile(0.25))
+    q12 = float(s.quantile(0.12))
+
+    return pd.DataFrame([
+        {"項目": "頂標(88%)", "分數": q88},
+        {"項目": "前標(75%)", "分數": q75},
+        {"項目": "均標(50%)", "分數": q50},
+        {"項目": "後標(25%)", "分數": q25},
+        {"項目": "底標(12%)", "分數": q12},
+        {"項目": "平均分", "分數": float(s.mean())},
+    ])
+
+
+def build_question_correct_rate(matrix_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    matrix_df：前6欄是題目資訊，第7欄起為各生對錯（對/錯）。
+    """
+    if matrix_df is None or matrix_df.empty:
+        return pd.DataFrame(columns=["題序", "題號", "配分", "難易度", "學習表現代碼", "答對率", "答對人數", "作答人數"])
+
+    base_cols = ["題序", "題號", "配分", "難易度", "學習表現代碼"]
+    student_cols = [c for c in matrix_df.columns if c not in ["題序", "題號", "配分", "難易度", "學習表現代碼", "題幹"]]
+    # student_cols 是像「1號學生對錯」
+    if not student_cols:
+        return pd.DataFrame(columns=base_cols + ["答對率", "答對人數", "作答人數"])
+
+    correct_cnt = (matrix_df[student_cols] == "對").sum(axis=1).astype(int)
+    total_cnt = matrix_df[student_cols].notna().sum(axis=1).astype(int)
+    rate = (correct_cnt / total_cnt.replace(0, pd.NA)).fillna(0.0)
+
+    out = matrix_df[base_cols].copy()
+    out["答對率"] = rate
+    out["答對人數"] = correct_cnt
+    out["作答人數"] = total_cnt
+    return out
+
+
+def stack_sections(sections: List[Tuple[str, pd.DataFrame]]) -> pd.DataFrame:
+    """
+    把多段表堆疊成單一 DataFrame，段落間插入空白列，並在每段前插入標題列。
+    """
+    blocks = []
+    max_cols = 1
+    for title, df in sections:
+        max_cols = max(max_cols, len(df.columns) if df is not None else 1)
+
+    def title_row(title: str) -> pd.DataFrame:
+        cols = [f"欄{i}" for i in range(1, max_cols + 1)]
+        row = {cols[0]: title}
+        return pd.DataFrame([row], columns=cols)
+
+    def df_to_block(df: pd.DataFrame) -> pd.DataFrame:
+        cols = [f"欄{i}" for i in range(1, max_cols + 1)]
+        if df is None or df.empty:
+            return pd.DataFrame(columns=cols)
+        # 把 df 原欄位塞進 欄1..欄N
+        new = pd.DataFrame(columns=cols)
+        for i, c in enumerate(df.columns.tolist()):
+            new[f"欄{i+1}"] = df[c]
+        return new
+
+    blank = pd.DataFrame([{}])
+
+    for idx, (title, df) in enumerate(sections):
+        blocks.append(title_row(title))
+        blocks.append(df_to_block(df))
+        if idx != len(sections) - 1:
+            blocks.append(blank)
+
+    out = pd.concat(blocks, ignore_index=True)
+    # 把空白列的 NaN 變空字串，Excel 讀起來比較乾淨
+    out = out.fillna("")
+    return out
 
 
 # -----------------------------
@@ -379,9 +532,9 @@ def init_state():
         "items": [],
         "q_df": safe_q_df(),
         "apply_msg": "",
-        "class_msg": "",
         "class_matrix_df": None,
         "class_summary_df": None,
+        "class_overall_df": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -399,9 +552,9 @@ def reset_all():
     st.session_state["items"] = []
     st.session_state["q_df"] = safe_q_df()
     st.session_state["apply_msg"] = ""
-    st.session_state["class_msg"] = ""
     st.session_state["class_matrix_df"] = None
     st.session_state["class_summary_df"] = None
+    st.session_state["class_overall_df"] = None
 
 
 # -----------------------------
@@ -411,9 +564,8 @@ st.set_page_config(page_title="考卷分析 MVP", layout="wide")
 init_state()
 
 st.title("考卷分析 MVP（可選字 PDF）")
-st.caption("上傳 PDF → 拆題 → 題目表回填（可上傳套用）→ 全班作答匯入 → 下載矩陣與總表")
+st.caption("上傳 PDF → 拆題 → 題目表回填（可上傳套用）→ 全班作答匯入 → 下載：逐題矩陣 / 學生總表 / 班級總體分析")
 
-# 全域 Reset
 st.button("Reset（清空全部）", on_click=reset_all)
 
 # ============ 1) 上傳解析 ============
@@ -430,7 +582,6 @@ with col2:
         disabled=(pdf_file is None and st.session_state.get("pdf_bytes") is None),
     )
 
-# 新檔案：只讀一次 bytes
 if pdf_file is not None:
     sig = file_signature(pdf_file)
     if st.session_state.get("uploaded_sig") != sig:
@@ -438,16 +589,15 @@ if pdf_file is not None:
         st.session_state["parsed_sig"] = None
         st.session_state["full_text"] = ""
         st.session_state["apply_msg"] = ""
-        st.session_state["class_msg"] = ""
         st.session_state["class_matrix_df"] = None
         st.session_state["class_summary_df"] = None
+        st.session_state["class_overall_df"] = None
 
         st.session_state["pdf_bytes"] = pdf_file.getvalue()
         set_items([])
         set_q_df(safe_q_df())
         st.success("已上傳新檔案。")
 
-# 解析（只做一次或手動）
 should_parse = False
 if st.session_state.get("pdf_bytes") is not None:
     if auto_parse and st.session_state.get("parsed_sig") != st.session_state.get("uploaded_sig"):
@@ -476,7 +626,6 @@ q_df_en = safe_q_df()
 if st.session_state.get("full_text") and not q_df_en.empty:
     st.write(f"題目數：**{len(q_df_en)}**（題號格式僅支援行首 `1.` 或 `1、`）")
 
-    # 2A 下載題目表模板（中文欄名）
     q_df_zh = q_df_to_teacher_df_zh(q_df_en)
     st.download_button(
         label="下載題目表 Excel（中文欄名，可回填）",
@@ -485,7 +634,6 @@ if st.session_state.get("full_text") and not q_df_en.empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # 2B 上傳老師回填題目表 → 套用
     st.markdown("### 上傳老師回填題目表 → 套用到系統")
     colA, colB, colC = st.columns([2, 1, 1])
     with colA:
@@ -497,7 +645,6 @@ if st.session_state.get("full_text") and not q_df_en.empty:
 
     if apply_btn and fill_file is not None:
         try:
-            # 先用使用者輸入的 sheet；失敗再容錯另一個
             try:
                 uploaded_df = read_teacher_excel(fill_file, sheet_name=fill_sheet)
             except Exception:
@@ -516,7 +663,6 @@ if st.session_state.get("full_text") and not q_df_en.empty:
         else:
             st.error(st.session_state["apply_msg"])
 
-    # 2C Web 端回填（可選）
     st.markdown("### 直接在網頁回填（可選）")
     edited_df = st.data_editor(
         safe_q_df(),
@@ -537,7 +683,6 @@ if st.session_state.get("full_text") and not q_df_en.empty:
     )
     set_q_df(edited_df)
 
-    # 2D 下載最新版（中文欄名）
     latest_zh = q_df_to_teacher_df_zh(safe_q_df())
     st.download_button(
         label="下載（含目前回填內容）題目表 Excel（中文欄名）",
@@ -545,10 +690,6 @@ if st.session_state.get("full_text") and not q_df_en.empty:
         file_name="題目表_老師回填_最新版.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
-    with st.expander("文字預覽（前 1200 字）", expanded=False):
-        text = st.session_state["full_text"]
-        st.text(text[:1200] + ("…" if len(text) > 1200 else ""))
 
 else:
     st.info("尚未解析：請先上傳 PDF 並完成解析，才會產生題目表。")
@@ -561,9 +702,8 @@ q_df_en = safe_q_df()
 if q_df_en.empty:
     st.info("請先完成：上傳 PDF → 解析拆題 → 建立題目表（必要）。")
 else:
-    st.markdown("### A) 下載全班作答匯入範本（中文欄名）")
-    n_rows = st.number_input("範本預設列數（可留更多空行給老師填）", min_value=5, max_value=200, value=40, step=5)
-    template_df = build_class_import_template(int(n_rows))
+    st.markdown("### A) 下載全班作答匯入範本（固定提供）")
+    template_df = build_class_import_template()
     st.download_button(
         label="下載全班作答匯入範本.xlsx",
         data=to_excel_bytes(template_df, sheet_name=ATT_SHEET_DEFAULT),
@@ -572,7 +712,7 @@ else:
     )
     st.caption("規則：作答字串『只有 - 算對』，其餘任何符號都算錯。作答字串長度必須 = 題目數，否則不分析並回報座號。")
 
-    st.markdown("### B) 上傳老師回填的全班作答 Excel → 產出兩張表（逐題矩陣 + 學生總表）")
+    st.markdown("### B) 上傳老師回填的全班作答 Excel → 產出：逐題矩陣 / 學生總表 / 班級總體分析")
 
     colA, colB, colC = st.columns([2, 1, 1])
     with colA:
@@ -594,15 +734,33 @@ else:
             if class_df.empty:
                 st.error("❌ 讀不到有效資料：請確認至少有『座號』與『作答字串』。")
             else:
-                n_q = len(q_df_en)
+                n_q = len(teacher_df_to_q_df_en(q_df_en))
                 ok, bad_df = validate_class_answers_length(class_df, n_q)
                 if not ok:
                     st.error(f"❌ 作答字串長度不一致（必須等於題目數 {n_q}）。以下座號有問題：")
                     st.dataframe(bad_df, use_container_width=True, height=260)
                 else:
                     matrix_df, summary_df = build_class_matrix_and_summary(q_df_en, class_df)
+
+                    # 班級總體分析 sheet
+                    qdf_norm = teacher_df_to_q_df_en(q_df_en).sort_values("order_index").reset_index(drop=True)
+                    total_score = float(qdf_norm["score"].fillna(0.0).sum())
+                    scores = summary_df["成績"].astype(float) if "成績" in summary_df.columns else pd.Series(dtype=float)
+
+                    dist_df = build_score_distribution(scores, total_score)
+                    five_df = build_five_standards(scores)
+                    qrate_df = build_question_correct_rate(matrix_df)
+
+                    overall_df = stack_sections([
+                        ("1) 班級成績組距（10分一組）", dist_df),
+                        ("2) 班級五標（頂/前/均/後/底）", five_df),
+                        ("3) 各題目班級答對率", qrate_df),
+                    ])
+
                     st.session_state["class_matrix_df"] = matrix_df
                     st.session_state["class_summary_df"] = summary_df
+                    st.session_state["class_overall_df"] = overall_df
+
                     st.success(f"✅ 全班分析完成：學生數 {len(summary_df)}，題數 {len(matrix_df)}")
 
         except Exception as e:
@@ -610,20 +768,25 @@ else:
 
     matrix_df = st.session_state.get("class_matrix_df", None)
     summary_df = st.session_state.get("class_summary_df", None)
+    overall_df = st.session_state.get("class_overall_df", None)
 
-    if isinstance(matrix_df, pd.DataFrame) and isinstance(summary_df, pd.DataFrame):
+    if isinstance(matrix_df, pd.DataFrame) and isinstance(summary_df, pd.DataFrame) and isinstance(overall_df, pd.DataFrame):
         st.markdown("### 逐題矩陣（欄位順序：題序、題號、配分、難易度、學習表現代碼、題幹、各生對錯）")
         st.dataframe(matrix_df, use_container_width=True, height=420)
 
-        with st.expander("學生總表", expanded=False):
-            st.dataframe(summary_df, use_container_width=True, height=320)
+        with st.expander("學生總表（含：成績、排名）", expanded=False):
+            st.dataframe(summary_df, use_container_width=True, height=340)
+
+        with st.expander("班級總體分析", expanded=False):
+            st.dataframe(overall_df, use_container_width=True, height=420)
 
         out_xls = to_excel_bytes_multi({
             "逐題矩陣": matrix_df,
             "學生總表": summary_df,
+            "班級總體分析": overall_df,
         })
         st.download_button(
-            label="下載全班分析結果 Excel（兩個 Sheet）",
+            label="下載全班分析結果 Excel（3個 Sheet）",
             data=out_xls,
             file_name="全班作答分析結果.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
