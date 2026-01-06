@@ -484,40 +484,47 @@ def build_question_correct_rate(matrix_df: pd.DataFrame) -> pd.DataFrame:
 
 def stack_sections(sections: List[Tuple[str, pd.DataFrame]]) -> pd.DataFrame:
     """
-    把多段表堆疊成單一 DataFrame，段落間插入空白列，並在每段前插入標題列。
+    把多段表堆疊成單一 DataFrame，段落間插入空白列，
+    並在每段前插入：
+      1) 區段標題列
+      2) 欄位標題列（用原本 df.columns）
+      3) 資料列
     """
     blocks = []
     max_cols = 1
-    for title, df in sections:
+    for _, df in sections:
         max_cols = max(max_cols, len(df.columns) if df is not None else 1)
 
-    def title_row(title: str) -> pd.DataFrame:
-        cols = [f"欄{i}" for i in range(1, max_cols + 1)]
-        row = {cols[0]: title}
+    cols = [f"欄{i}" for i in range(1, max_cols + 1)]
+
+    def make_row(values: List[Any]) -> pd.DataFrame:
+        row = {cols[i]: values[i] for i in range(min(len(values), max_cols))}
         return pd.DataFrame([row], columns=cols)
 
-    def df_to_block(df: pd.DataFrame) -> pd.DataFrame:
-        cols = [f"欄{i}" for i in range(1, max_cols + 1)]
-        if df is None or df.empty:
-            return pd.DataFrame(columns=cols)
-        # 把 df 原欄位塞進 欄1..欄N
-        new = pd.DataFrame(columns=cols)
-        for i, c in enumerate(df.columns.tolist()):
-            new[f"欄{i+1}"] = df[c]
-        return new
-
-    blank = pd.DataFrame([{}])
+    blank = pd.DataFrame([{}], columns=cols)
 
     for idx, (title, df) in enumerate(sections):
-        blocks.append(title_row(title))
-        blocks.append(df_to_block(df))
+        # 1) 區段標題列
+        blocks.append(make_row([title]))
+
+        # 若 df 為空，也要留一行提示
+        if df is None or df.empty:
+            blocks.append(make_row(["（無資料）"]))
+        else:
+            # 2) 欄位標題列：把 df.columns 寫入
+            blocks.append(make_row(df.columns.tolist()))
+
+            # 3) 資料列：逐列寫入
+            for _, r in df.iterrows():
+                blocks.append(make_row(r.tolist()))
+
+        # 段落間空白列
         if idx != len(sections) - 1:
             blocks.append(blank)
 
-    out = pd.concat(blocks, ignore_index=True)
-    # 把空白列的 NaN 變空字串，Excel 讀起來比較乾淨
-    out = out.fillna("")
+    out = pd.concat(blocks, ignore_index=True).fillna("")
     return out
+
 
 
 # -----------------------------
